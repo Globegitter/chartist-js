@@ -68,7 +68,7 @@ var Chartist = {
     var sources = Array.prototype.slice.call(arguments, 1);
     sources.forEach(function(source) {
       for (var prop in source) {
-        if (typeof source[prop] === 'object' && !(source[prop] instanceof Array)) {
+        if (typeof source[prop] === 'object' && source[prop] !== null && !(source[prop] instanceof Array)) {
           target[prop] = Chartist.extend({}, target[prop], source[prop]);
         } else {
           target[prop] = source[prop];
@@ -329,10 +329,6 @@ var Chartist = {
    * @return {Array} A plain array that contains the data to be visualized in the chart
    */
   Chartist.getDataArray = function (data, reverse) {
-    var array = [],
-      value,
-      localData;
-
     // If the data should be reversed but isn't we need to reverse it
     // If it's reversed but it shouldn't we need to reverse it back
     // That's required to handle data updates correctly and to reflect the responsive configurations
@@ -341,27 +337,21 @@ var Chartist = {
       data.reversed = !data.reversed;
     }
 
-    for (var i = 0; i < data.series.length; i++) {
-      // If the series array contains an object with a data property we will use the property
-      // otherwise the value directly (array or number).
-      // We create a copy of the original data array with Array.prototype.push.apply
-      localData = typeof(data.series[i]) === 'object' && data.series[i].data !== undefined ? data.series[i].data : data.series[i];
-      if(localData instanceof Array) {
-        array[i] = [];
-        Array.prototype.push.apply(array[i], localData);
+    // Rcursively walks through nested arrays and convert string values to numbers and objects with value properties
+    // to values. Check the tests in data core -> data normalization for a detailed specification of expected values
+    function recursiveConvert(value) {
+      if(value === undefined || value === null || (typeof value === 'number' && isNaN(value))) {
+        return 0;
+      } else if((value.data || value) instanceof Array) {
+        return (value.data || value).map(recursiveConvert);
+      } else if(value.hasOwnProperty('value')) {
+        return recursiveConvert(value.value);
       } else {
-        array[i] = localData;
-      }
-
-      // Convert object values to numbers
-      for (var j = 0; j < array[i].length; j++) {
-        value = array[i][j];
-        value = value.value === 0 ? 0 : (value.value || value);
-        array[i][j] = +value;
+        return +value;
       }
     }
 
-    return array;
+    return data.series.map(recursiveConvert);
   };
 
   /**
@@ -456,25 +446,43 @@ var Chartist = {
    *
    * @memberof Chartist.Core
    * @param {Array} dataArray The array that contains the data to be visualized in the chart
+   * @param {Object} options The Object that contains all the optional values for the chart
    * @return {Object} An object that contains the highest and lowest value that will be visualized on the chart.
    */
-  Chartist.getHighLow = function (dataArray) {
+  Chartist.getHighLow = function (dataArray, options) {
     var i,
       j,
       highLow = {
-        high: -Number.MAX_VALUE,
-        low: Number.MAX_VALUE
-      };
+        high: options.high === undefined ? -Number.MAX_VALUE : +options.high,
+        low: options.low === undefined ? Number.MAX_VALUE : +options.low
+      },
+      findHigh = options.high === undefined,
+      findLow = options.low === undefined;
 
     for (i = 0; i < dataArray.length; i++) {
       for (j = 0; j < dataArray[i].length; j++) {
-        if (dataArray[i][j] > highLow.high) {
+        if (findHigh && dataArray[i][j] > highLow.high) {
           highLow.high = dataArray[i][j];
         }
 
-        if (dataArray[i][j] < highLow.low) {
+        if (findLow && dataArray[i][j] < highLow.low) {
           highLow.low = dataArray[i][j];
         }
+      }
+    }
+
+    // If high and low are the same because of misconfiguration or flat data (only the same value) we need
+    // to set the high or low to 0 depending on the polarity
+    if (highLow.high <= highLow.low) {
+      // If both values are 0 we set high to 1
+      if (highLow.low === 0) {
+        highLow.high = 1;
+      } else if (highLow.low < 0) {
+        // If we have the same negative value for the bounds we set bounds.high to 0
+        highLow.high = 0;
+      } else {
+        // If we have the same positive value for the bounds we set bounds.low to 0
+        highLow.low = 0;
       }
     }
 
@@ -499,21 +507,6 @@ var Chartist = {
         high: highLow.high,
         low: highLow.low
       };
-
-    // If high and low are the same because of misconfiguration or flat data (only the same value) we need
-    // to set the high or low to 0 depending on the polarity
-    if(bounds.high === bounds.low) {
-      // If both values are 0 we set high to 1
-      if(bounds.low === 0) {
-        bounds.high = 1;
-      } else if(bounds.low < 0) {
-        // If we have the same negative value for the bounds we set bounds.high to 0
-        bounds.high = 0;
-      } else {
-        // If we have the same positive value for the bounds we set bounds.low to 0
-        bounds.low = 0;
-      }
-    }
 
     // Overrides of high / low based on reference value, it will make sure that the invisible reference value is
     // used to generate the chart. This is useful when the chart always needs to contain the position of the
@@ -601,9 +594,14 @@ var Chartist = {
   Chartist.createChartRect = function (svg, options, fallbackPadding) {
     var yOffset = options.axisY ? options.axisY.offset || 0 : 0,
       xOffset = options.axisX ? options.axisX.offset || 0 : 0,
-      w = Chartist.stripUnit(options.width) || svg.width(),
-      h = Chartist.stripUnit(options.height) || svg.height(),
+      // If width or height results in invalid value (including 0) we fallback to the unitless settings or even 0
+      w = svg.width() || Chartist.stripUnit(options.width) || 0,
+      h = svg.height() || Chartist.stripUnit(options.height) || 0,
       normalizedPadding = Chartist.normalizePadding(options.chartPadding, fallbackPadding);
+
+    // If settings were to small to cope with offset (legacy) and padding, we'll adjust
+    w = Math.max(w, xOffset + normalizedPadding.left + normalizedPadding.right);
+    h = Math.max(h, yOffset + normalizedPadding.top + normalizedPadding.bottom);
 
     return {
       x1: normalizedPadding.left + yOffset,
@@ -1449,6 +1447,7 @@ var Chartist = {
   /**
    * Returns the parent Chartist.SVG wrapper object
    *
+   * @memberof Chartist.Svg
    * @return {Chartist.Svg} Returns a Chartist.Svg wrapper around the parent node of the current node. If the parent node is not existing or it's not an SVG node then this function will return null.
    */
   function parent() {
@@ -1458,6 +1457,7 @@ var Chartist = {
   /**
    * This method returns a Chartist.Svg wrapper around the root SVG element of the current tree.
    *
+   * @memberof Chartist.Svg
    * @return {Chartist.Svg} The root SVG element wrapped in a Chartist.Svg element
    */
   function root() {
@@ -1471,6 +1471,7 @@ var Chartist = {
   /**
    * Find the first child SVG element of the current element that matches a CSS selector. The returned object is a Chartist.Svg wrapper.
    *
+   * @memberof Chartist.Svg
    * @param {String} selector A CSS selector that is used to query for child SVG elements
    * @return {Chartist.Svg} The SVG wrapper for the element found or null if no element was found
    */
@@ -1482,6 +1483,7 @@ var Chartist = {
   /**
    * Find the all child SVG elements of the current element that match a CSS selector. The returned object is a Chartist.Svg.List wrapper.
    *
+   * @memberof Chartist.Svg
    * @param {String} selector A CSS selector that is used to query for child SVG elements
    * @return {Chartist.Svg.List} The SVG wrapper list for the element found or null if no element was found
    */
@@ -1648,6 +1650,24 @@ var Chartist = {
   }
 
   /**
+   * "Save" way to get property value from svg BoundingBox.
+   * This is a workaround. Firefox throws an NS_ERROR_FAILURE error if getBBox() is called on an invisible node.
+   * See [NS_ERROR_FAILURE: Component returned failure code: 0x80004005](http://jsfiddle.net/sym3tri/kWWDK/)
+   *
+   * @memberof Chartist.Svg
+   * @param {SVGElement} node The svg node to
+   * @param {String} prop The property to fetch (ex.: height, width, ...)
+   * @returns {Number} The value of the given bbox property
+   */
+  function getBBoxProperty(node, prop) {
+    try {
+      return node.getBBox()[prop];
+    } catch(e) {}
+
+    return 0;
+  }
+
+  /**
    * Get element height with fallback to svg BoundingBox or parent container dimensions:
    * See [bugzilla.mozilla.org](https://bugzilla.mozilla.org/show_bug.cgi?id=530985)
    *
@@ -1655,7 +1675,7 @@ var Chartist = {
    * @return {Number} The elements height in pixels
    */
   function height() {
-    return this._node.clientHeight || Math.round(this._node.getBBox().height) || this._node.parentNode.clientHeight;
+    return this._node.clientHeight || Math.round(getBBoxProperty(this._node, 'height')) || this._node.parentNode.clientHeight;
   }
 
   /**
@@ -1666,7 +1686,7 @@ var Chartist = {
    * @return {Number} The elements width in pixels
    */
   function width() {
-    return this._node.clientWidth || Math.round(this._node.getBBox().width) || this._node.parentNode.clientWidth;
+    return this._node.clientWidth || Math.round(getBBoxProperty(this._node, 'width')) || this._node.parentNode.clientWidth;
   }
 
   /**
@@ -2483,10 +2503,7 @@ var Chartist = {
 
     var chartRect = Chartist.createChartRect(this.svg, options, defaultOptions.padding);
 
-    var highLow = Chartist.getHighLow(normalizedData);
-    // Overrides of high / low from settings
-    highLow.high = +options.high || (options.high === 0 ? 0 : highLow.high);
-    highLow.low = +options.low || (options.low === 0 ? 0 : highLow.low);
+    var highLow = Chartist.getHighLow(normalizedData, options);
 
     var axisX = new Chartist.StepAxis(
       Chartist.Axis.units.x,
@@ -2869,9 +2886,9 @@ var Chartist = {
         return Array.prototype.slice.call(arguments).reduce(Chartist.sum, 0);
       });
 
-      highLow = Chartist.getHighLow([serialSums]);
+      highLow = Chartist.getHighLow([serialSums], options);
     } else {
-      highLow = Chartist.getHighLow(normalizedData);
+      highLow = Chartist.getHighLow(normalizedData, options);
     }
     // Overrides of high / low from settings
     highLow.high = +options.high || (options.high === 0 ? 0 : highLow.high);
@@ -3130,7 +3147,7 @@ var Chartist = {
     height: undefined,
     // Padding of the chart drawing area to the container element and labels as a number or padding object {top: 5, right: 5, bottom: 5, left: 5}
     chartPadding: 5,
-    // Override the class names that get used to generate the SVG structure of the chart
+    // Override the class names that are used to generate the SVG structure of the chart
     classNames: {
       chart: 'ct-chart-pie',
       series: 'ct-series',
@@ -3224,7 +3241,7 @@ var Chartist = {
 
     // Check if there is only one non-zero value in the series array.
     var hasSingleValInSeries = this.data.series.filter(function(val) {
-      return val !== 0;
+      return val.hasOwnProperty('value') ? val.value !== 0 : val !== 0;
     }).length === 1;
 
     // Draw the series
@@ -3232,13 +3249,11 @@ var Chartist = {
     for (var i = 0; i < this.data.series.length; i++) {
       seriesGroups[i] = this.svg.elem('g', null, null, true);
 
-      // If the series is an object and contains a name we add a custom attribute
-      if(this.data.series[i].name) {
-        seriesGroups[i].attr({
-          'series-name': this.data.series[i].name,
-          'meta': Chartist.serialize(this.data.series[i].meta)
-        }, Chartist.xmlNs.uri);
-      }
+      // If the series is an object and contains a name or meta data we add a custom attribute
+      seriesGroups[i].attr({
+        'series-name': this.data.series[i].name,
+        'meta': Chartist.serialize(this.data.series[i].meta)
+      }, Chartist.xmlNs.uri);
 
       // Use series class from series data or if not set generate one
       seriesGroups[i].addClass([
@@ -3340,7 +3355,7 @@ var Chartist = {
    *
    * @memberof Chartist.Pie
    * @param {String|Node} query A selector query string or directly a DOM element
-   * @param {Object} data The data object in the pie chart needs to have a series property with a one dimensional data array. The values will be normalized against each other and don't necessarily need to be in percentage. The series property can also be an array of objects that contain a data property with the value and a className property to override the CSS class name for the series group.
+   * @param {Object} data The data object in the pie chart needs to have a series property with a one dimensional data array. The values will be normalized against each other and don't necessarily need to be in percentage. The series property can also be an array of value objects that contain a value property and a className property to override the CSS class name for the series group.
    * @param {Object} [options] The options object with options that override the default options. Check the examples for a detailed list.
    * @param {Array} [responsiveOptions] Specify an array of responsive option arrays which are a media query and options object pair => [[mediaQueryString, optionsObject],[more...]]
    * @return {Object} An object with a version and an update method to manually redraw the chart
@@ -3381,17 +3396,25 @@ var Chartist = {
    * });
    *
    * @example
-   * // Overriding the class names for individual series
+   * // Overriding the class names for individual series as well as a name and meta data.
+   * // The name will be written as ct:series-name attribute and the meta data will be serialized and written
+   * // to a ct:meta attribute.
    * new Chartist.Pie('.ct-chart', {
    *   series: [{
-   *     data: 20,
-   *     className: 'my-custom-class-one'
+   *     value: 20,
+   *     name: 'Series 1',
+   *     className: 'my-custom-class-one',
+   *     meta: 'Meta One'
    *   }, {
-   *     data: 10,
-   *     className: 'my-custom-class-two'
+   *     value: 10,
+   *     name: 'Series 2',
+   *     className: 'my-custom-class-two',
+   *     meta: 'Meta Two'
    *   }, {
-   *     data: 70,
-   *     className: 'my-custom-class-three'
+   *     value: 70,
+   *     name: 'Series 3',
+   *     className: 'my-custom-class-three',
+   *     meta: 'Meta Three'
    *   }]
    * });
    */
